@@ -23,11 +23,17 @@ python -m pytest
 
 ## Known limitation — Windows gamma clamp
 Color control uses the GPU gamma ramp (`SetDeviceGammaRamp`). Windows rejects ramps
-that deviate too far from linear, so the **visible warming saturates around ~3300K** —
-the slider still goes to 2700K, but below ~3300K it doesn't get visibly warmer.
-nightshift clamps the ramp so it's always accepted (no failures), it just plateaus.
+that deviate too far from linear, so by default the **visible warming saturates
+around ~3300K** — the slider still goes to 2700K, but below ~3300K it doesn't get
+visibly warmer. nightshift clamps the ramp so it's always accepted (no failures),
+it just plateaus.
 
-The often-cited registry workaround
-(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiICMGammaRange = 256`,
-DWORD, then reboot) had **no effect** on the test machine (Windows 11) — your mileage
-may vary. Also turn off Windows **Night light**; it conflicts with gamma-ramp control.
+**Extended range (opt-in).** Setting the registry value
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiICMGammaRange = 256`
+(DWORD) and **rebooting Windows** unlocks the full range down to ~1500K — verified
+on Windows 11 with `scripts/probe_unclamped.py`. This needs admin once and a real
+reboot, so nightshift will surface it as an in-app "Extended color range" toggle
+(cycle-01) rather than requiring it up front. Same trick f.lux's installer does
+silently during admin install.
+
+Also turn off Windows **Night light**; it conflicts with gamma-ramp control.

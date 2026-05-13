@@ -25,9 +25,9 @@ cycles/cycle-NN/       # plan/do/check/act
 - `python -m pytest`
 
 ## 핵심 제약 (cycle-00에서 실측 — `cycles/cycle-00/check.md` 참고)
-- 색온도 제어 = GPU 감마 램프(`SetDeviceGammaRamp`). Windows는 선형에서 ±0x8000 넘게 벗어난 램프를 거부 → **시각적 색온도 하한 ≈ 3300K**.
-- `HKLM\...\ICM\GdiICMGammaRange=256` + 재부팅 우회법은 **이 PC에선 무효**(실측). "확장 모드" 기능 보류.
-- 대응: `build_gamma_ramp`이 램프를 항상 Windows 허용 범위로 클램핑 → `apply_kelvin` 실패 안 함, 단 ≈3300K 아래는 효과 포화. UI에서 안내 예정.
+- 색온도 제어 = GPU 감마 램프(`SetDeviceGammaRamp`). Windows는 선형에서 ±0x8000 넘게 벗어난 램프를 거부 → **기본 상태 시각적 하한 ≈ 3300K**.
+- `HKLM\...\ICM\GdiICMGammaRange=256` + **실제 Windows 재부팅** 시 그 제한이 풀려 1500K까지 시각 적용 확인됨(`scripts/probe_unclamped.py`로 재현). 관리자 권한·재부팅 필요 → 일반 사용자에겐 강요 안 함.
+- 채택안 (**C**): 기본은 클램핑(`apply_kelvin` 항상 성공, ≈3300K에서 효과 포화). 옵션으로 **"확장 색온도 범위"** 토글 — 활성화 시 안내 다이얼로그 → 관리자 권한으로 레지스트리 설정 + 재부팅 안내 → 이후 클램핑 끄고 풀범위 사용. (cycle-01에서 구현)
 - `SetDeviceGammaRamp`/`apply_kelvin` 반환값(성공/실패)을 항상 확인할 것 (HDR/드라이버 거부 가능).
 
 ## 사이클 로그
