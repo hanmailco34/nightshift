@@ -15,17 +15,17 @@ src/nightshift/
   color/
     temperature.py       # kelvin_to_rgb(k) -> (r,g,b) 배율 (Tanner Helland)
     gamma.py             # build_gamma_ramp / identity_ramp / apply_kelvin (clamp_to_windows_limit) / reset + CLI
-    controller.py        # Controller + from_config: mode/extended_range/모니터별 K 관리, apply_current
+    controller.py        # Controller(day/night/single) + visual_floor/effective_target_for + from_config
   display/monitors.py    # list_monitors() -> [Monitor], find_by_device()
-  config/store.py        # load/save/default_config/ensure_monitor_entries (%APPDATA%\nightshift\config.json)
+  config/store.py        # load/save/default_config/ensure_monitor_entries + schema v2(mode/single_k/presets) + v1→v2 자동 마이그레이션
   schedule/engine.py     # Scheduler(데몬 스레드, 30s tick, 5s 보간) + current_target_mode/next_transition (manual/astral)
   platform/
     registry.py          # GdiICMGammaRange 읽기 전용 (winreg)
     autostart.py         # HKCU\...\Run 등록/해제, sync_with_config
     fullscreen.py        # is_fullscreen_app_visible (GetForegroundWindow + 모니터 rect 매칭)
   ui/
-    main_window.py       # tkinter 메인 + 사이드 카드(스케줄/자동실행/기타) + 상태바 + 일시중지 배너 + 확장 모드 다이얼로그
-    tray.py              # pystray 트레이(열기/일시중지/야간 즉시/종료)
+    main_window.py       # tkinter 메인 + 모드 라디오(주간/야간/단일) + 동적 슬라이더 + 프리셋 칩 영역(저장·이름변경·삭제) + 사이드 카드 + 상태바 + 일시중지 배너 + 확장 모드 다이얼로그
+    tray.py              # pystray 트레이(열기/일시중지/야간 즉시/프리셋 ▶/종료)
 tests/                   # pytest (temperature, gamma ramp, config, controller, schedule engine, autostart, fullscreen)
 cycles/cycle-NN/         # plan/do/check/act
 scripts/
@@ -52,4 +52,5 @@ nightshift.spec          # PyInstaller 6.x spec (onefile, windowed)
 - **cycle-00** (색온도 제어 PoC) — 레포 스캐폴딩 + temperature/gamma/monitors 구현 + 단위테스트 11 green. 모니터 3대 열거 OK, 색온도 적용 OK(단 ≥~3300K), Windows 감마 클램프 제약 발견·문서화. → 다음: cycle-01 UI + config + 모니터별 개별 설정.
 - **cycle-01** (UI + config + 확장 색온도 범위) — config/store, platform/registry, color/controller, ui/main_window 구현 + `apply_kelvin`에 `clamp_to_windows_limit` 키워드 인자 추가. tkinter 메인 윈도우(개별ON=탭, 개별OFF=글로벌 단일 페이지, day/night 슬라이더 + 미리보기, 슬라이더=현재 모드 자동전환). 확장 색온도 범위 옵트인 토글(레지스트리 안내 다이얼로그 + 자가 진단). 단위테스트 33 green, 실 PC 7항목 수동 검증 통과. → 다음: cycle-02 스케줄/트레이/자동실행/전체화면감지.
 - **cycle-02** (스케줄 + 트레이 + 자동실행 + 전체화면 감지) — schedule/engine(Scheduler 데몬 스레드, 30s tick, 5초 20스텝 K 보간, manual/astral 모드, `on_mode_change` 콜백), platform/autostart(HKCU Run), platform/fullscreen(GetForegroundWindow rect 매칭), ui/tray(pystray, 4메뉴) 추가. ui/main_window 보강 — 사이드 카드(스케줄+위/경도+적용버튼/자동실행/기타 토글), 일시중지 노란 배너, 하단 상태바, 창 X = 트레이 최소화, 슬라이더 입력 시 보간 즉시 취소. 단위테스트 66 green(+33), 실 PC 7항목 수동 검증 통과 + 사용자 피드백 3건(적용 버튼/일시중지 배너/모드 라디오 동기화) 반영. → 다음: cycle-03 PyInstaller onefile 빌드 + GitHub Releases.
-- **cycle-03** (PyInstaller onefile + GitHub Releases) — scripts/make_icon.py + assets/nightshift.ico(16/32/48/256 멀티사이즈 노란 디스크), nightshift.spec(PyInstaller 6, onefile windowed, hiddenimports pystray._win32/PIL._tkinter_finder, excludes astral.geocoder/tkinter.test 등, upx=False), .github/workflows/release.yml(v*.*.* 태그 푸시 시 windows-latest 자동 빌드 + softprops/action-gh-release@v2 업로드), README 보강(Download/SmartScreen 안내/빌드 명령). `__main__.py`의 relative import → absolute로 교체(PyInstaller가 entry 모듈을 패키지 컨텍스트 없이 실행하는 함정). 첫 빌드 8MB가 알고 보니 import 실패한 stub였고 패치 후 진짜 31.58MB(40MB 한계의 79%). 회귀 통과, 단위테스트 66 green 유지. → PDCA 4사이클 완주. v0.1.0 태그 푸시는 사용자 자율 시점.
+- **cycle-03** (PyInstaller onefile + GitHub Releases) — scripts/make_icon.py + assets/nightshift.ico(16/32/48/256 멀티사이즈 노란 디스크), nightshift.spec(PyInstaller 6, onefile windowed, hiddenimports pystray._win32/PIL._tkinter_finder, excludes astral.geocoder/tkinter.test 등, upx=False), .github/workflows/release.yml(v*.*.* 태그 푸시 시 windows-latest 자동 빌드 + softprops/action-gh-release@v2 업로드), README 보강(Download/SmartScreen 안내/빌드 명령). `__main__.py`의 relative import → absolute로 교체(PyInstaller가 entry 모듈을 패키지 컨텍스트 없이 실행하는 함정). 첫 빌드 8MB가 알고 보니 import 실패한 stub였고 패치 후 진짜 31.58MB(40MB 한계의 79%). 회귀 통과, 단위테스트 66 green 유지. → v0.1.0 릴리스 (GitHub Actions로 자동 빌드 + nightshift.exe 첨부).
+- **cycle-04** (단일 모드 + 프리셋) — config schema v2(`mode`, `global.single_k`, `monitors[d].single_k`, `presets`) + v1→v2 자동 마이그레이션. controller에 `Mode = Literal["day","night","single"]` + `visual_floor()` / `effective_target_for()`(raw K는 보존하면서 OS에는 `max(floor, raw)`만 전달). schedule.engine은 mode=="single"일 때 evaluate skip. ui/main_window: 모드 라디오에 "단일" 추가, MonitorPage가 mode별로 day+night 슬라이더 vs single 슬라이더 1개를 동적 빌드, 본문 하단에 프리셋 칩 영역(빌트인 4개 시드 + "+ 저장"/우클릭 컨텍스트로 이름 변경·삭제), 라벨/미리보기가 floored K 표시(슬라이더 thumb과 일치). ui/tray: 메뉴에 "프리셋 ▶" 서브메뉴(`Icon.update_menu`로 동적). 사용자 피드백 2건 반영: 확장 OFF 시 K<3300 프리셋 disabled, 확장 OFF 토글 후 화면이 실제로 ~3300K로 변하도록 visual floor 도입. 단위테스트 79 green(+13). → 다음: cycle-05 후보(프리셋 export/import, 단축키, 코드 사이닝 등).

@@ -119,3 +119,48 @@ def test_kelvin_for_mode_per_monitor_on_falls_back_for_unknown():
         global_targets = {"day_k": 6500, "night_k": 3300}
     assert engine._kelvin_for_mode(FakeCtrl(), "\\\\.\\D1", "night") == 2000
     assert engine._kelvin_for_mode(FakeCtrl(), "\\\\.\\D2", "night") == 3300
+
+
+def test_scheduler_skips_evaluation_in_single_mode():
+    class FakeCtrl:
+        mode = "single"
+        extended_range = False
+        per_monitor_enabled = False
+        monitors: dict = {}
+        global_targets = {"day_k": 6500, "night_k": 3300, "single_k": 3300}
+
+    triggered: list = []
+
+    sched = engine.Scheduler(
+        FakeCtrl(),
+        get_devices=lambda: ["\\\\.\\D1"],
+        root=None,
+        get_cfg=_cfg,
+    )
+    sched._begin_transition = lambda target: triggered.append(target)  # type: ignore[method-assign]
+    sched._evaluate_once()
+    assert triggered == []
+
+
+def test_scheduler_evaluates_in_day_or_night_mode():
+    class FakeCtrl:
+        mode = "day"
+        extended_range = False
+        per_monitor_enabled = False
+        monitors: dict = {}
+        global_targets = {"day_k": 6500, "night_k": 3300, "single_k": 3300}
+
+    triggered: list = []
+
+    # Inverted-schedule trick to make "night" the target at virtually any
+    # real wall-clock time without mocking datetime.now():
+    # day_t (23:59) > night_t (00:00) → night spans [00:00, 23:59).
+    sched = engine.Scheduler(
+        FakeCtrl(),
+        get_devices=lambda: ["\\\\.\\D1"],
+        root=None,
+        get_cfg=lambda: _cfg(night_start="00:00", day_start="23:59"),
+    )
+    sched._begin_transition = lambda target: triggered.append(target)  # type: ignore[method-assign]
+    sched._evaluate_once()
+    assert triggered == ["night"]

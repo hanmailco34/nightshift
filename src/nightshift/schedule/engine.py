@@ -190,6 +190,9 @@ class Scheduler:
     def _evaluate_once(self) -> None:
         if self._paused:
             return
+        # Single mode is user-driven; the scheduler must not flip it.
+        if self.controller.mode == "single":
+            return
         cfg = self.get_cfg()
         target = current_target_mode(datetime.now(), cfg)
         if self.controller.mode != target:

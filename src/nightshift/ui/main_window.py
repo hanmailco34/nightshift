@@ -1,22 +1,18 @@
-"""tkinter main window for nightshift (cycle-02).
+"""tkinter main window for nightshift (cycle-04).
 
 Layout:
-- Top bar: mode radio, per-monitor toggle, extended-range toggle.
-- Body (left): monitor pages (Notebook tabs when per-monitor is on; a single
-  global page when off).
-- Side (right): schedule / autostart / fullscreen settings cards.
-- Bottom: status bar (current mode + K, schedule mode, optional failure text).
+- Top bar: mode radio (주간/야간/**단일**), per-monitor toggle, extended-range toggle.
+- Left body:
+  - Monitor pages area (Notebook tabs in per-monitor mode, single global page
+    otherwise). MonitorPage renders day/night sliders OR a single slider
+    depending on ``controller.mode``.
+  - Presets area underneath: chip-row of preset buttons + "+ 저장" + per-chip
+    right-click context menu (이름 변경 / 삭제).
+- Right side card: schedule / autostart / fullscreen toggles (cycle-02).
+- Bottom: status bar, plus a yellow pause banner above the body when paused.
 
 Window close (X) hides to the tray; quitting only happens from the tray
 "종료" menu item (the one place we reset gamma).
-
-cycle-02 additions over cycle-01:
-- Schedule + autostart + fullscreen integration via ``schedule.engine``,
-  ``platform.autostart``, ``platform.fullscreen``.
-- System tray via ``ui.tray``; tray menu handlers are marshalled to the tk
-  main thread with ``root.after(0, ...)``.
-- 5-second linear K interpolation on mode change (in ``schedule.engine``).
-  Slider drags call ``scheduler.cancel_transition()`` so user input wins.
 """
 
 from __future__ import annotations
@@ -24,8 +20,8 @@ from __future__ import annotations
 import re
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, ttk
-from typing import Dict, List, Optional
+from tkinter import messagebox, simpledialog, ttk
+from typing import Any, Dict, List, Optional
 
 from .. import MAX_KELVIN
 from ..color import controller as ctl
@@ -43,6 +39,7 @@ UNCLAMPED_MIN_K = 1500
 DEBOUNCE_MS = 200
 FULLSCREEN_POLL_MS = 300
 NEXT_LABEL_REFRESH_MS = 60_000
+PRESET_GRID_COLS = 4
 
 PS_COMMAND = (
     "Set-ItemProperty -Path "
@@ -59,95 +56,100 @@ def _rgb_to_hex(rgb) -> str:
 
 
 class MonitorPage(ttk.Frame):
-    """day/night sliders + preview boxes for one device (or the global page)."""
+    """Slider section for one device (or the global page).
+
+    Renders **day+night** sliders when ``current_mode`` is ``"day"`` or
+    ``"night"``, or a single **single** slider when ``current_mode`` is
+    ``"single"``. The page is reconstructed (not toggled in place) when
+    the mode changes — see ``MainWindow._refresh_pages``.
+    """
 
     def __init__(self, parent, device_name: Optional[str], header: str,
-                 on_change, on_release, current_min_k: int):
+                 on_change, on_release, current_min_k: int,
+                 current_mode: str):
         super().__init__(parent, padding=12)
         self.device_name = device_name
         self._on_change = on_change
         self._on_release = on_release
         self._refreshing = False
-        self._build(header, current_min_k)
+        self.current_mode = current_mode
+        self._build(header, current_min_k, current_mode)
 
-    def _build(self, header: str, min_k: int) -> None:
+    def _build(self, header: str, min_k: int, mode: str) -> None:
         ttk.Label(self, text=header, font=("Segoe UI", 11, "bold")
                   ).grid(row=0, column=0, columnspan=2, sticky="w")
-
-        self.day_var = tk.IntVar(value=max(6500, min_k))
-        self.night_var = tk.IntVar(value=max(3300, min_k))
-
-        ttk.Label(self, text="주간 (Day)").grid(row=1, column=0, sticky="w",
-                                                  pady=(10, 0))
-        self.day_label = ttk.Label(self, text=f"{self.day_var.get()} K")
-        self.day_label.grid(row=1, column=1, sticky="e", pady=(10, 0))
-        self.day_scale = tk.Scale(
-            self, from_=min_k, to=MAX_KELVIN, orient="horizontal",
-            variable=self.day_var, showvalue=False, resolution=50, length=380,
-            command=lambda v: self._on_slider("day", int(float(v))))
-        self.day_scale.grid(row=2, column=0, columnspan=2, sticky="ew")
-        self.day_scale.bind("<ButtonRelease-1>",
-                            lambda _e: self._on_release_evt("day"))
-        self.day_preview = tk.Frame(
-            self, height=44, bg=_rgb_to_hex(kelvin_to_rgb(self.day_var.get())))
-        self.day_preview.grid(row=3, column=0, columnspan=2, sticky="ew",
-                              pady=(4, 14))
-
-        ttk.Label(self, text="야간 (Night)").grid(row=4, column=0, sticky="w")
-        self.night_label = ttk.Label(self, text=f"{self.night_var.get()} K")
-        self.night_label.grid(row=4, column=1, sticky="e")
-        self.night_scale = tk.Scale(
-            self, from_=min_k, to=MAX_KELVIN, orient="horizontal",
-            variable=self.night_var, showvalue=False, resolution=50, length=380,
-            command=lambda v: self._on_slider("night", int(float(v))))
-        self.night_scale.grid(row=5, column=0, columnspan=2, sticky="ew")
-        self.night_scale.bind("<ButtonRelease-1>",
-                              lambda _e: self._on_release_evt("night"))
-        self.night_preview = tk.Frame(
-            self, height=44, bg=_rgb_to_hex(kelvin_to_rgb(self.night_var.get())))
-        self.night_preview.grid(row=6, column=0, columnspan=2, sticky="ew",
-                                pady=(4, 0))
-
+        if mode == "single":
+            self._build_section("single", "색온도 (Single)", 1, min_k, 4200)
+        else:
+            self._build_section("day", "주간 (Day)", 1, min_k, 6500)
+            self._build_section("night", "야간 (Night)", 4, min_k, 3300)
         self.columnconfigure(0, weight=1)
+
+    def _build_section(self, which: str, label_text: str, base_row: int,
+                       min_k: int, default_k: int) -> None:
+        var = tk.IntVar(value=max(default_k, min_k))
+        ttk.Label(self, text=label_text).grid(
+            row=base_row, column=0, sticky="w", pady=(10, 0))
+        label = ttk.Label(self, text=f"{var.get()} K")
+        label.grid(row=base_row, column=1, sticky="e", pady=(10, 0))
+        scale = tk.Scale(
+            self, from_=min_k, to=MAX_KELVIN, orient="horizontal",
+            variable=var, showvalue=False, resolution=50, length=380,
+            command=lambda v, w=which: self._on_slider(w, int(float(v))))
+        scale.grid(row=base_row + 1, column=0, columnspan=2, sticky="ew")
+        scale.bind("<ButtonRelease-1>",
+                    lambda _e, w=which: self._on_release_evt(w))
+        preview = tk.Frame(
+            self, height=44, bg=_rgb_to_hex(kelvin_to_rgb(var.get())))
+        preview.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew",
+                     pady=(4, 14))
+
+        setattr(self, f"{which}_var", var)
+        setattr(self, f"{which}_label", label)
+        setattr(self, f"{which}_scale", scale)
+        setattr(self, f"{which}_preview", preview)
 
     def _on_slider(self, which: str, value: int) -> None:
         if self._refreshing:
             return
-        if which == "day":
-            self.day_label.configure(text=f"{value} K")
-            self.day_preview.configure(bg=_rgb_to_hex(kelvin_to_rgb(value)))
-        else:
-            self.night_label.configure(text=f"{value} K")
-            self.night_preview.configure(bg=_rgb_to_hex(kelvin_to_rgb(value)))
+        getattr(self, f"{which}_label").configure(text=f"{value} K")
+        getattr(self, f"{which}_preview").configure(
+            bg=_rgb_to_hex(kelvin_to_rgb(value)))
         self._on_change(self.device_name, which, value)
 
     def _on_release_evt(self, which: str) -> None:
         self._on_release(self.device_name, which)
 
-    def set_values(self, day_k: int, night_k: int) -> None:
+    def set_values(self, day_k: int, night_k: int, single_k: int) -> None:
+        """Update the underlying IntVars with the *raw* K values; the
+        label/preview show the **floored** K (matching what the OS gets)
+        so the visible UI agrees with what's on screen.
+        """
         self._refreshing = True
         try:
-            self.day_var.set(day_k)
-            self.night_var.set(night_k)
+            for which, v in (("day", day_k), ("night", night_k),
+                              ("single", single_k)):
+                if hasattr(self, f"{which}_var"):
+                    getattr(self, f"{which}_var").set(int(v))
         finally:
             self._refreshing = False
-        self.day_label.configure(text=f"{self.day_var.get()} K")
-        self.night_label.configure(text=f"{self.night_var.get()} K")
-        self.day_preview.configure(
-            bg=_rgb_to_hex(kelvin_to_rgb(self.day_var.get())))
-        self.night_preview.configure(
-            bg=_rgb_to_hex(kelvin_to_rgb(self.night_var.get())))
-
-    def update_min(self, min_k: int) -> None:
-        self.day_scale.configure(from_=min_k)
-        self.night_scale.configure(from_=min_k)
+        for which, v in (("day", day_k), ("night", night_k),
+                          ("single", single_k)):
+            if not hasattr(self, f"{which}_scale"):
+                continue
+            scale = getattr(self, f"{which}_scale")
+            floor = int(float(scale.cget("from")))
+            displayed = max(floor, int(v))
+            getattr(self, f"{which}_label").configure(text=f"{displayed} K")
+            getattr(self, f"{which}_preview").configure(
+                bg=_rgb_to_hex(kelvin_to_rgb(displayed)))
 
 
 class MainWindow:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("nightshift")
-        self.root.geometry("960x600")
+        self.root.geometry("960x640")
         try:
             self.root.iconbitmap(default="")
         except tk.TclError:
@@ -170,14 +172,12 @@ class MainWindow:
         self.pages: Dict[Optional[str], MonitorPage] = {}
         self._debounce_job: Optional[str] = None
 
-        # cycle-02 state
         self._paused = False
         self._fullscreen_active = False
         self._first_minimize = True
         self._fullscreen_after: Optional[str] = None
         self._next_label_after: Optional[str] = None
 
-        # Coordinators
         self.scheduler = engine.Scheduler(
             self.controller,
             get_devices=lambda: [m.device_name for m in self.monitors],
@@ -191,15 +191,22 @@ class MainWindow:
             on_night_now=lambda: self.root.after(0, self._tray_night_now),
             on_quit=lambda: self.root.after(0, self._tray_quit),
             is_paused=lambda: self._paused,
+            on_apply_preset=lambda name: self.root.after(
+                0, lambda: self._apply_preset_by_name(name)),
+            get_presets=lambda: [(p["name"], self._is_preset_enabled(p))
+                                  for p in self.cfg.get("presets", [])],
         )
 
         self._build_ui()
         self._refresh_pages()
+        self._refresh_presets()
         if self.monitors:
-            # Snap to the current target mode immediately, no interpolation.
-            target = engine.current_target_mode(datetime.now(), self.cfg)
-            self.controller.set_mode(target)
-            self.mode_var.set(target)
+            # Only auto-snap to the scheduler's target mode if the user is in
+            # day/night. Single mode is user-driven and must persist verbatim.
+            if self.controller.mode != "single":
+                target = engine.current_target_mode(datetime.now(), self.cfg)
+                self.controller.set_mode(target)
+                self.mode_var.set(target)
             self._apply_now()
 
         autostart.sync_with_config(self.cfg)
@@ -208,7 +215,6 @@ class MainWindow:
 
     # ---- UI construction -------------------------------------------------
     def _build_ui(self) -> None:
-        # top
         top = ttk.Frame(self.root, padding=(14, 12))
         top.pack(side="top", fill="x")
 
@@ -218,6 +224,9 @@ class MainWindow:
                          command=self._on_mode_change
                          ).pack(side="left", padx=(8, 0))
         ttk.Radiobutton(top, text="야간", variable=self.mode_var, value="night",
+                         command=self._on_mode_change
+                         ).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(top, text="단일", variable=self.mode_var, value="single",
                          command=self._on_mode_change
                          ).pack(side="left", padx=(6, 18))
 
@@ -233,30 +242,33 @@ class MainWindow:
 
         ttk.Separator(self.root, orient="horizontal").pack(fill="x", padx=14)
 
-        # status bar (bottom — packed early so right/left fill remaining)
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(
             self.root, textvariable=self.status_var, foreground="gray",
             padding=(14, 6), anchor="w")
         self.status_label.pack(side="bottom", fill="x")
 
-        # side card (right)
         self.side = ttk.Frame(self.root, padding=(0, 8, 14, 8))
         self.side.pack(side="right", fill="y")
         self._build_side_card()
 
-        # body (left, takes the remainder)
+        # Body (left): pages on top, presets at the bottom
         self.body = ttk.Frame(self.root)
         self.body.pack(side="left", fill="both", expand=True,
                        padx=(14, 8), pady=(8, 4))
 
-        # Pause banner — created hidden, packed on demand above side+body.
+        self.presets_area = ttk.LabelFrame(self.body, text="프리셋", padding=8)
+        self.presets_area.pack(side="bottom", fill="x", pady=(8, 0))
+
+        self.pages_area = ttk.Frame(self.body)
+        self.pages_area.pack(side="top", fill="both", expand=True)
+
+        # Pause banner — packed on demand above side+body
         self.pause_banner = tk.Label(
             self.root, text="", bg="#f1c40f", fg="#2c3e50",
             font=("Segoe UI", 11, "bold"), padx=14, pady=8, anchor="w")
 
     def _build_side_card(self) -> None:
-        # Schedule
         sched = ttk.LabelFrame(self.side, text="스케줄", padding=10)
         sched.pack(fill="x", pady=(0, 8))
 
@@ -312,7 +324,6 @@ class MainWindow:
                               pady=(8, 0))
         sched.columnconfigure(0, weight=1)
 
-        # Autostart
         auto = ttk.LabelFrame(self.side, text="자동 실행", padding=10)
         auto.pack(fill="x", pady=(0, 8))
         self.autostart_var = tk.BooleanVar(
@@ -321,7 +332,6 @@ class MainWindow:
                          variable=self.autostart_var,
                          command=self._on_autostart_change).pack(anchor="w")
 
-        # Other toggles
         other = ttk.LabelFrame(self.side, text="기타", padding=10)
         other.pack(fill="x")
         self.disable_fs_var = tk.BooleanVar(
@@ -335,38 +345,181 @@ class MainWindow:
         return UNCLAMPED_MIN_K if self.controller.extended_range else CLAMPED_MIN_K
 
     def _refresh_pages(self) -> None:
-        for child in self.body.winfo_children():
+        for child in self.pages_area.winfo_children():
             child.destroy()
         self.pages.clear()
 
         min_k = self._current_min_k()
+        mode = self.controller.mode
 
         if self.per_var.get() and self.monitors:
-            nb = ttk.Notebook(self.body)
+            nb = ttk.Notebook(self.pages_area)
             nb.pack(fill="both", expand=True)
             for m in self.monitors:
                 page = MonitorPage(
                     nb, m.device_name,
                     f"{m.label}  ({m.width}x{m.height})",
-                    self._on_slider_change, self._on_slider_release, min_k)
+                    self._on_slider_change, self._on_slider_release,
+                    min_k, mode)
                 tgt = self.controller.monitors.get(
                     m.device_name, self.controller.global_targets)
-                page.set_values(int(tgt["day_k"]), int(tgt["night_k"]))
+                page.set_values(int(tgt["day_k"]), int(tgt["night_k"]),
+                                int(tgt.get("single_k",
+                                            self.controller.global_targets["single_k"])))
                 nb.add(page, text=f"Monitor {m.index + 1}")
                 self.pages[m.device_name] = page
         else:
             page = MonitorPage(
-                self.body, None, "전체 모니터 (글로벌)",
-                self._on_slider_change, self._on_slider_release, min_k)
+                self.pages_area, None, "전체 모니터 (글로벌)",
+                self._on_slider_change, self._on_slider_release, min_k, mode)
             g = self.controller.global_targets
-            page.set_values(int(g["day_k"]), int(g["night_k"]))
+            page.set_values(int(g["day_k"]), int(g["night_k"]),
+                            int(g["single_k"]))
             page.pack(fill="both", expand=True)
             self.pages[None] = page
+
+    # ---- preset area -----------------------------------------------------
+    def _is_preset_enabled(self, preset: Dict[str, Any]) -> bool:
+        """A preset is disabled when any of its K values dips below the current
+        slider lower bound — i.e., warmer than what the OS will visibly apply
+        without the extended-range toggle."""
+        min_k = self._current_min_k()
+        default_k = preset.get("default_k")
+        per_dev = preset.get("kelvins") or {}
+        all_ks: List[int] = [int(v) for v in per_dev.values()]
+        if default_k is not None:
+            all_ks.append(int(default_k))
+        if not all_ks:
+            return True
+        return all(k >= min_k for k in all_ks)
+
+    def _refresh_presets(self) -> None:
+        for child in self.presets_area.winfo_children():
+            child.destroy()
+
+        presets = list(self.cfg.get("presets", []))
+        cols = PRESET_GRID_COLS
+        for i, p in enumerate(presets):
+            enabled = self._is_preset_enabled(p)
+            state = "normal" if enabled else "disabled"
+            btn = ttk.Button(self.presets_area, text=p["name"],
+                              state=state,
+                              command=lambda preset=p: self._apply_preset(preset))
+            btn.grid(row=i // cols, column=i % cols, padx=4, pady=2,
+                     sticky="ew")
+            # Right-click context (rename/delete) stays usable even when
+            # the preset's K is below the current lower bound.
+            btn.bind("<Button-3>",
+                     lambda e, preset=p: self._show_preset_context(preset, e))
+
+        n = len(presets)
+        add_btn = ttk.Button(self.presets_area, text="+ 저장",
+                              command=self._save_preset_dialog)
+        add_btn.grid(row=n // cols, column=n % cols, padx=4, pady=2,
+                     sticky="ew")
+
+        for c in range(cols):
+            self.presets_area.columnconfigure(c, weight=1, minsize=140)
+
+    def _apply_preset(self, preset: Dict[str, Any]) -> None:
+        if not self.monitors:
+            return
+        self.scheduler.cancel_transition()
+        default_k = preset.get("default_k")
+        per_dev = preset.get("kelvins") or {}
+        mode = self.controller.mode  # type: ignore[assignment]
+
+        # Global value: explicit default_k, else average of per-device K
+        global_k: Optional[int] = (
+            int(default_k) if default_k is not None
+            else (int(round(sum(per_dev.values()) / len(per_dev)))
+                  if per_dev else None)
+        )
+        if global_k is not None:
+            self.controller.set_temperature(None, mode, global_k)
+
+        for m in self.monitors:
+            k = per_dev.get(m.device_name)
+            if k is None:
+                k = default_k
+            if k is None:
+                continue
+            self.controller.set_temperature(m.device_name, mode, int(k))
+
+        self._apply_now()
+        self._refresh_pages()
+        self._save()
+
+    def _apply_preset_by_name(self, name: str) -> None:
+        preset = next((p for p in self.cfg.get("presets", [])
+                       if p.get("name") == name), None)
+        if preset is not None:
+            self._apply_preset(preset)
+
+    def _save_preset_dialog(self) -> None:
+        name = simpledialog.askstring("프리셋 저장", "프리셋 이름:",
+                                        parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if any(p["name"] == name for p in self.cfg.get("presets", [])):
+            messagebox.showwarning("nightshift",
+                                    f"이미 같은 이름의 프리셋이 있습니다: {name}")
+            return
+        kelvins = {m.device_name: int(self.controller.target_for(m.device_name))
+                   for m in self.monitors}
+        key = f"{self.controller.mode}_k"
+        default_k = int(self.controller.global_targets[key])
+        self.cfg.setdefault("presets", []).append({
+            "name": name, "default_k": default_k, "kelvins": kelvins})
+        store.save(self.cfg)
+        self._refresh_presets()
+        self.tray.update_presets()
+
+    def _show_preset_context(self, preset: Dict[str, Any], event) -> None:
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="이름 변경",
+                          command=lambda: self._rename_preset(preset))
+        menu.add_command(label="삭제",
+                          command=lambda: self._delete_preset(preset))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _rename_preset(self, preset: Dict[str, Any]) -> None:
+        new = simpledialog.askstring("이름 변경", "새 이름:",
+                                       initialvalue=preset.get("name", ""),
+                                       parent=self.root)
+        if not new or not new.strip() or new.strip() == preset["name"]:
+            return
+        new = new.strip()
+        if any(p["name"] == new for p in self.cfg.get("presets", [])
+                if p is not preset):
+            messagebox.showwarning("nightshift",
+                                    f"이미 같은 이름의 프리셋이 있습니다: {new}")
+            return
+        preset["name"] = new
+        store.save(self.cfg)
+        self._refresh_presets()
+        self.tray.update_presets()
+
+    def _delete_preset(self, preset: Dict[str, Any]) -> None:
+        if not messagebox.askyesno(
+                "삭제 확인",
+                f"'{preset.get('name')}' 프리셋을 삭제하시겠습니까?",
+                parent=self.root):
+            return
+        presets = self.cfg.get("presets", [])
+        if preset in presets:
+            presets.remove(preset)
+            store.save(self.cfg)
+            self._refresh_presets()
+            self.tray.update_presets()
 
     # ---- slider callbacks ------------------------------------------------
     def _on_slider_change(self, device: Optional[str], which: str,
                           value: int) -> None:
-        # User input wins over any in-flight interpolation.
         self.scheduler.cancel_transition()
         if self.mode_var.get() != which:
             self.mode_var.set(which)
@@ -394,6 +547,7 @@ class MainWindow:
         self._refresh_status(failed)
 
     def _save(self) -> None:
+        self.cfg["mode"] = self.controller.mode
         self.cfg["per_monitor_enabled"] = self.controller.per_monitor_enabled
         self.cfg["extended_range"] = self.controller.extended_range
         self.cfg["global"] = dict(self.controller.global_targets)
@@ -405,6 +559,8 @@ class MainWindow:
     def _on_mode_change(self) -> None:
         self.scheduler.cancel_transition()
         self.controller.set_mode(self.mode_var.get())  # type: ignore[arg-type]
+        self._refresh_pages()           # mode changed -> different slider layout
+        self._refresh_next_label_now()  # hide 'next transition' in single mode
         self._apply_now()
         self._save()
 
@@ -423,6 +579,8 @@ class MainWindow:
         if not self.ext_var.get():
             self.controller.set_extended_range(False)
             self._refresh_pages()
+            self._refresh_presets()        # disable warmer presets
+            self.tray.update_presets()
             self._apply_now()
             self._save()
             return
@@ -431,6 +589,8 @@ class MainWindow:
             return
         self.controller.set_extended_range(True)
         self._refresh_pages()
+        self._refresh_presets()            # re-enable warmer presets
+        self.tray.update_presets()
         self._apply_now()
         self._save()
 
@@ -443,7 +603,6 @@ class MainWindow:
         self._refresh_status()
 
     def _on_schedule_field_changed(self) -> None:
-        # Validate + persist. Silently ignore invalid entries (revert var).
         ds, ns = self.day_start_var.get().strip(), self.night_start_var.get().strip()
         if _HHMM_RE.match(ds) and _HHMM_RE.match(ns):
             self.cfg["schedule"]["day_start"] = ds
@@ -451,7 +610,6 @@ class MainWindow:
         else:
             self.day_start_var.set(self.cfg["schedule"]["day_start"])
             self.night_start_var.set(self.cfg["schedule"]["night_start"])
-
         try:
             lat = float(self.lat_var.get().strip())
             lon = float(self.lon_var.get().strip())
@@ -460,7 +618,6 @@ class MainWindow:
         except ValueError:
             self.lat_var.set(str(self.cfg["location"]["lat"]))
             self.lon_var.set(str(self.cfg["location"]["lon"]))
-
         store.save(self.cfg)
         self._refresh_next_label_now()
         self._refresh_status()
@@ -585,7 +742,6 @@ class MainWindow:
                     [m.device_name for m in self.monitors])
             self._refresh_status()
         elif self._fullscreen_active:
-            # toggle was turned off mid-fullscreen — restore
             self._fullscreen_active = False
             self.controller.apply_current(
                 [m.device_name for m in self.monitors])
@@ -594,6 +750,9 @@ class MainWindow:
             FULLSCREEN_POLL_MS, self._fullscreen_tick)
 
     def _refresh_next_label_now(self) -> None:
+        if self.controller.mode == "single":
+            self.next_label.configure(text="(단일 모드 — 스케줄 사용 안 함)")
+            return
         try:
             nt = engine.next_transition(datetime.now(), self.cfg)
             target = engine.current_target_mode(datetime.now(), self.cfg)
@@ -608,13 +767,14 @@ class MainWindow:
             NEXT_LABEL_REFRESH_MS, self._refresh_next_label_loop)
 
     def _refresh_status(self, failed: Optional[List[str]] = None) -> None:
-        mode_label = "주간" if self.controller.mode == "day" else "야간"
+        m = self.controller.mode
+        mode_label = {"day": "주간", "night": "야간", "single": "단일"}.get(m, m)
         sched_label = "일몰감지" if self.cfg["toggles"]["use_sunset"] else "수동"
         primary = next((m for m in self.monitors if m.primary),
                         self.monitors[0] if self.monitors else None)
         k_text = ""
         if primary:
-            k = self.controller.target_for(primary.device_name)
+            k = self.controller.effective_target_for(primary.device_name)
             k_text = f" {k}K"
         if self._paused:
             base = "일시중지 — 모든 모니터 정상색"
@@ -622,6 +782,9 @@ class MainWindow:
         elif self._fullscreen_active:
             base = f"전체화면 감지 — 임시 정상색 (모드 {mode_label})"
             fg = "dimgray"
+        elif self.controller.mode == "single":
+            base = f"{mode_label}{k_text} - 자동 전환 안 함"
+            fg = "gray"
         else:
             base = f"{mode_label}{k_text} - {sched_label} 스케줄"
             fg = "gray"
@@ -633,9 +796,10 @@ class MainWindow:
 
     # ---- external mode change (from scheduler interpolation finish) ------
     def _on_external_mode_change(self, mode: str) -> None:
-        # Keep the top-bar radio in sync when the scheduler auto-transitions.
         if self.mode_var.get() != mode:
             self.mode_var.set(mode)
+        # mode toggled by scheduler — rebuild pages so the right slider shows
+        self._refresh_pages()
         self._refresh_status()
 
     # ---- pause banner ----------------------------------------------------
@@ -650,7 +814,7 @@ class MainWindow:
     def _hide_pause_banner(self) -> None:
         self.pause_banner.pack_forget()
 
-    # ---- tray handlers (run on tk main thread via after) ----------------
+    # ---- tray handlers --------------------------------------------------
     def _tray_open(self) -> None:
         self.root.deiconify()
         self.root.lift()
@@ -661,9 +825,11 @@ class MainWindow:
             self._paused = False
             self._hide_pause_banner()
             self.scheduler.resume()
-            target = engine.current_target_mode(datetime.now(), self.cfg)
-            self.controller.set_mode(target)
-            self.mode_var.set(target)
+            if self.controller.mode != "single":
+                target = engine.current_target_mode(datetime.now(), self.cfg)
+                self.controller.set_mode(target)
+                self.mode_var.set(target)
+                self._refresh_pages()
             self._apply_now()
         else:
             self._paused = True
@@ -681,8 +847,6 @@ class MainWindow:
             self._hide_pause_banner()
             self.scheduler.resume()
         self.mode_var.set("night")
-        # Don't pre-set controller.mode — let the transition end-step do it
-        # so on_mode_change fires correctly.
         self.scheduler.begin_transition_now("night")
         self._refresh_status()
 
@@ -691,7 +855,6 @@ class MainWindow:
 
     # ---- shutdown -------------------------------------------------------
     def _on_close(self) -> None:
-        # cycle-02: closing the window minimises to tray instead of resetting.
         if self._first_minimize:
             self._first_minimize = False
             self.tray.notify("nightshift는 트레이에서 계속 실행됩니다. "
