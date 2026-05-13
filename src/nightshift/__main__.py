@@ -7,8 +7,10 @@ import sys
 
 
 def _diagnose() -> int:
+    # Use absolute imports so PyInstaller (which loads this file as the
+    # top-level __main__ module without package context) can resolve them.
     try:
-        from .display.monitors import list_monitors
+        from nightshift.display.monitors import list_monitors
     except OSError as exc:
         print(f"nightshift: {exc}")
         return 1
@@ -24,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--diagnose":
         return _diagnose()
-    from .ui.main_window import run
+    from nightshift.ui.main_window import run
     return run()
 
 
