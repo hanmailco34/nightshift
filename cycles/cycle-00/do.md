@@ -6,12 +6,12 @@
 - `src/nightshift/__main__.py` — 진단용 엔트리포인트(모니터 목록 출력). UI는 cycle-01.
 - `src/nightshift/color/temperature.py` — `kelvin_to_rgb(k) -> (r,g,b)` 배율, Tanner Helland 근사. `[0,1]` 클램프.
 - `src/nightshift/color/gamma.py`
-  - `build_gamma_ramp(kelvin, brightness=1.0)` — `[red,green,blue]` 각 256개 WORD(0–65535). 채널 = 선형 램프 × 화이트포인트 배율 × brightness.
+  - `build_gamma_ramp(kelvin, brightness=1.0, clamp_to_windows_limit=True)` — `[red,green,blue]` 각 256개 WORD(0–65535). 채널 = 선형 램프 × 화이트포인트 배율 × brightness, 그리고 각 엔트리를 선형 ±`WINDOWS_GAMMA_DEVIATION_LIMIT`(32000) 안으로 클램핑(아래 check.md 참고).
   - `identity_ramp()` — 무보정(선형) 램프.
   - `apply_kelvin(device_name, kelvin, brightness)` / `reset(device_name)` — `CreateDCW("DISPLAY", deviceName)` → `SetDeviceGammaRamp` → `DeleteDC`. 비-Windows에선 `OSError`.
   - CLI: `python -m nightshift.color.gamma --list | --apply <idx> <kelvin> | --reset`.
 - `src/nightshift/display/monitors.py` — `Monitor` 데이터클래스 + `list_monitors()`(`EnumDisplayMonitors`+`GetMonitorInfoW`로 device/geometry/primary, `EnumDisplayDevicesW`로 모델명), `find_by_device()`. 좌→우, 상→하 정렬.
-- 테스트: `tests/test_temperature.py`(5케이스), `tests/test_gamma_ramp.py`(6케이스).
+- 테스트: `tests/test_temperature.py`(5케이스), `tests/test_gamma_ramp.py`(8케이스 — 형상/16bit범위/단조성/항등근사/blue감쇠/brightness/클램프한계/미클램프초과). 총 13 green.
 
 ## 설치/실행
 - `pip install -e .` 로 editable 설치 → `python -m nightshift`, `python -m nightshift.color.gamma ...` 동작.

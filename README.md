@@ -23,14 +23,11 @@ python -m pytest
 
 ## Known limitation — Windows gamma clamp
 Color control uses the GPU gamma ramp (`SetDeviceGammaRamp`). Windows rejects ramps
-that deviate too far from linear, so **out of the box the warmest reachable value is
-~3300K**. To go warmer (e.g. 2700K), set this registry value (as Administrator) and
-reboot:
+that deviate too far from linear, so the **visible warming saturates around ~3300K** —
+the slider still goes to 2700K, but below ~3300K it doesn't get visibly warmer.
+nightshift clamps the ramp so it's always accepted (no failures), it just plateaus.
 
-```
-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM
-  GdiICMGammaRange  (DWORD) = 256
-```
-
-A future build will offer a one-click "extended range" setup for this. Also turn off
-Windows **Night light** — it conflicts with gamma-ramp adjustment.
+The often-cited registry workaround
+(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\GdiICMGammaRange = 256`,
+DWORD, then reboot) had **no effect** on the test machine (Windows 11) — your mileage
+may vary. Also turn off Windows **Night light**; it conflicts with gamma-ramp control.

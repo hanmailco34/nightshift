@@ -39,8 +39,26 @@ def test_warm_temperature_attenuates_blue_channel():
 
 
 def test_brightness_scales_all_channels():
-    full = build_gamma_ramp(6500, brightness=1.0)
-    half = build_gamma_ramp(6500, brightness=0.5)
+    # without the Windows clamp, brightness uniformly scales the endpoints
+    full = build_gamma_ramp(6500, brightness=1.0, clamp_to_windows_limit=False)
+    half = build_gamma_ramp(6500, brightness=0.5, clamp_to_windows_limit=False)
     for fch, hch in zip(full, half):
         assert abs(hch[-1] - fch[-1] * 0.5) <= 1.0
-    assert build_gamma_ramp(6500, brightness=0.0)[0][-1] == 0
+    assert build_gamma_ramp(6500, brightness=0.0, clamp_to_windows_limit=False)[0][-1] == 0
+
+
+def test_clamp_keeps_entries_within_windows_deviation_limit():
+    from nightshift.color.gamma import RAMP_SIZE, _WORD_MAX, WINDOWS_GAMMA_DEVIATION_LIMIT
+    for k in (1500, 2000, 2700, 3300, 6500):
+        for ch in build_gamma_ramp(k):  # clamp on by default
+            for i, v in enumerate(ch):
+                linear = round((i / (RAMP_SIZE - 1)) * _WORD_MAX)
+                assert abs(v - linear) <= WINDOWS_GAMMA_DEVIATION_LIMIT
+
+
+def test_unclamped_warm_ramp_exceeds_the_limit():
+    # sanity: this is *why* the clamp exists
+    from nightshift.color.gamma import RAMP_SIZE, _WORD_MAX, WINDOWS_GAMMA_DEVIATION_LIMIT
+    blue = build_gamma_ramp(2700, clamp_to_windows_limit=False)[2]
+    worst = max(abs(v - round((i / (RAMP_SIZE - 1)) * _WORD_MAX)) for i, v in enumerate(blue))
+    assert worst > WINDOWS_GAMMA_DEVIATION_LIMIT

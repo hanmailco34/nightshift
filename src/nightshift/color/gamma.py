@@ -19,22 +19,41 @@ from .temperature import kelvin_to_rgb
 RAMP_SIZE = 256
 _WORD_MAX = 65535
 
+# Windows (Vista+) rejects a gamma ramp if any entry deviates more than
+# ~0x8000 from the linear value ``i / 255 * 65535``. We clamp slightly inside
+# that so warm temperatures degrade gracefully (the tint visually plateaus
+# around ~3300K) instead of SetDeviceGammaRamp failing outright.
+WINDOWS_GAMMA_DEVIATION_LIMIT = 32000
 
-def build_gamma_ramp(kelvin: float, brightness: float = 1.0) -> List[List[int]]:
+
+def build_gamma_ramp(kelvin: float, brightness: float = 1.0,
+                     clamp_to_windows_limit: bool = True) -> List[List[int]]:
     """Return ``[red, green, blue]``, each a list of 256 WORD values.
 
     ``brightness`` (0..1) uniformly scales every channel; 1.0 is full.
     6500K at brightness 1.0 is approximately (but not exactly) the identity
     ramp; for an exact "no correction" reset use :func:`identity_ramp`.
+
+    When ``clamp_to_windows_limit`` is true (default) every entry is kept
+    within :data:`WINDOWS_GAMMA_DEVIATION_LIMIT` of the linear ramp so the
+    OS will accept it; the visible warming therefore saturates near ~3300K.
     """
     r_mul, g_mul, b_mul = kelvin_to_rgb(kelvin)
     b = 0.0 if brightness < 0.0 else 1.0 if brightness > 1.0 else brightness
+    limit = WINDOWS_GAMMA_DEVIATION_LIMIT
     channels = []
     for mul in (r_mul * b, g_mul * b, b_mul * b):
         channel = []
         for i in range(RAMP_SIZE):
-            # base value spread across the 16-bit range, then tinted
-            value = int(round((i / (RAMP_SIZE - 1)) * _WORD_MAX * mul))
+            linear = (i / (RAMP_SIZE - 1)) * _WORD_MAX
+            value = int(round(linear * mul))
+            if clamp_to_windows_limit:
+                lo = int(round(linear)) - limit
+                hi = int(round(linear)) + limit
+                if value < lo:
+                    value = lo
+                elif value > hi:
+                    value = hi
             channel.append(0 if value < 0 else _WORD_MAX if value > _WORD_MAX else value)
         channels.append(channel)
     return channels
