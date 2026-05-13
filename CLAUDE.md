@@ -10,18 +10,24 @@ Windows 멀티모니터 색온도 제어 앱 (f.lux 클론). Python + tkinter, P
 ## 프로젝트 구조
 ```
 src/nightshift/
-  __init__.py        # 버전, Kelvin 상수
-  __main__.py        # 엔트리포인트(현재: 모니터 진단 / cycle-01에서 UI)
-  color/temperature.py  # kelvin_to_rgb(k) -> (r,g,b) 배율 (Tanner Helland)
-  color/gamma.py        # build_gamma_ramp / identity_ramp / apply_kelvin / reset + CLI
-  display/monitors.py   # list_monitors() -> [Monitor], find_by_device()
-  config/ schedule/ platform/ ui/   # cycle-01~02에서 채움
-tests/                 # pytest (temperature, gamma ramp)
-cycles/cycle-NN/       # plan/do/check/act
+  __init__.py            # 버전, Kelvin 상수
+  __main__.py            # 엔트리포인트(기본=UI, --diagnose=모니터 진단)
+  color/
+    temperature.py       # kelvin_to_rgb(k) -> (r,g,b) 배율 (Tanner Helland)
+    gamma.py             # build_gamma_ramp / identity_ramp / apply_kelvin (clamp_to_windows_limit) / reset + CLI
+    controller.py        # Controller + from_config: mode/extended_range/모니터별 K 관리, apply_current
+  display/monitors.py    # list_monitors() -> [Monitor], find_by_device()
+  config/store.py        # load/save/default_config/ensure_monitor_entries (%APPDATA%\nightshift\config.json)
+  platform/registry.py   # GdiICMGammaRange 읽기 전용 (winreg). autostart/fullscreen은 cycle-02
+  ui/main_window.py      # tkinter 메인 윈도우 + MonitorPage + 확장 모드 다이얼로그
+  schedule/              # cycle-02에서 채움
+tests/                   # pytest (temperature, gamma ramp, config store, controller)
+cycles/cycle-NN/         # plan/do/check/act
+scripts/                 # probe_unclamped.py (GdiICMGammaRange 시각 확인 진단)
 ```
 
 ## 개발 셋업
-- `pip install -e .` (editable) → `python -m nightshift`, `python -m nightshift.color.gamma --help`
+- `pip install -e .` (editable) → `python -m nightshift` (메인 윈도우), `python -m nightshift --diagnose` (모니터 진단), `python -m nightshift.color.gamma --help` (CLI 스모크).
 - `python -m pytest`
 
 ## 핵심 제약 (cycle-00에서 실측 — `cycles/cycle-00/check.md` 참고)
@@ -32,3 +38,4 @@ cycles/cycle-NN/       # plan/do/check/act
 
 ## 사이클 로그
 - **cycle-00** (색온도 제어 PoC) — 레포 스캐폴딩 + temperature/gamma/monitors 구현 + 단위테스트 11 green. 모니터 3대 열거 OK, 색온도 적용 OK(단 ≥~3300K), Windows 감마 클램프 제약 발견·문서화. → 다음: cycle-01 UI + config + 모니터별 개별 설정.
+- **cycle-01** (UI + config + 확장 색온도 범위) — config/store, platform/registry, color/controller, ui/main_window 구현 + `apply_kelvin`에 `clamp_to_windows_limit` 키워드 인자 추가. tkinter 메인 윈도우(개별ON=탭, 개별OFF=글로벌 단일 페이지, day/night 슬라이더 + 미리보기, 슬라이더=현재 모드 자동전환). 확장 색온도 범위 옵트인 토글(레지스트리 안내 다이얼로그 + 자가 진단). 단위테스트 33 green, 실 PC 7항목 수동 검증 통과. → 다음: cycle-02 스케줄/트레이/자동실행/전체화면감지.

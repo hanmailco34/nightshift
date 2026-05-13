@@ -109,32 +109,36 @@ def _set_ramp_on_dc(hdc, ramp) -> bool:
     return bool(gdi32.SetDeviceGammaRamp(hdc, ctypes.byref(arr)))
 
 
-def apply_kelvin(device_name: str | None, kelvin: float, brightness: float = 1.0) -> bool:
+def _apply_ramp_to_device(device_name: str | None, ramp) -> bool:
+    _require_windows()
+    import ctypes
+
+    hdc = _create_display_dc(device_name)
+    try:
+        return _set_ramp_on_dc(hdc, ramp)
+    finally:
+        ctypes.windll.gdi32.DeleteDC(ctypes.c_void_p(hdc))
+
+
+def apply_kelvin(device_name: str | None, kelvin: float, brightness: float = 1.0,
+                 clamp_to_windows_limit: bool = True) -> bool:
     """Apply ``kelvin`` to one display. Returns True on success.
 
     ``device_name`` is a value from :func:`nightshift.display.monitors.list_monitors`
     (``\\\\.\\DISPLAYn``); ``None`` targets the primary display device context.
-    """
-    _require_windows()
-    import ctypes
 
-    hdc = _create_display_dc(device_name)
-    try:
-        return _set_ramp_on_dc(hdc, build_gamma_ramp(kelvin, brightness))
-    finally:
-        ctypes.windll.gdi32.DeleteDC(ctypes.c_void_p(hdc))
+    ``clamp_to_windows_limit=False`` skips the safety clamp — only useful after
+    ``GdiICMGammaRange=256`` + Windows reboot (see README); otherwise Windows
+    will reject warm ramps and the call returns False.
+    """
+    ramp = build_gamma_ramp(kelvin, brightness,
+                            clamp_to_windows_limit=clamp_to_windows_limit)
+    return _apply_ramp_to_device(device_name, ramp)
 
 
 def reset(device_name: str | None) -> bool:
     """Restore the identity (uncorrected) ramp for one display."""
-    _require_windows()
-    import ctypes
-
-    hdc = _create_display_dc(device_name)
-    try:
-        return _set_ramp_on_dc(hdc, identity_ramp())
-    finally:
-        ctypes.windll.gdi32.DeleteDC(ctypes.c_void_p(hdc))
+    return _apply_ramp_to_device(device_name, identity_ramp())
 
 
 # --------------------------------------------------------------------------

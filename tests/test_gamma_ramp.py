@@ -62,3 +62,22 @@ def test_unclamped_warm_ramp_exceeds_the_limit():
     blue = build_gamma_ramp(2700, clamp_to_windows_limit=False)[2]
     worst = max(abs(v - round((i / (RAMP_SIZE - 1)) * _WORD_MAX)) for i, v in enumerate(blue))
     assert worst > WINDOWS_GAMMA_DEVIATION_LIMIT
+
+
+def test_apply_kelvin_propagates_clamp_kwarg(monkeypatch):
+    from nightshift.color import gamma
+
+    seen: dict = {}
+
+    def fake_build(kelvin, brightness=1.0, clamp_to_windows_limit=True):
+        seen["clamp"] = clamp_to_windows_limit
+        return [[0] * 256 for _ in range(3)]
+
+    monkeypatch.setattr(gamma, "build_gamma_ramp", fake_build)
+    monkeypatch.setattr(gamma, "_apply_ramp_to_device", lambda d, r: True)
+
+    assert gamma.apply_kelvin("X", 2700, clamp_to_windows_limit=False) is True
+    assert seen["clamp"] is False
+
+    assert gamma.apply_kelvin("X", 2700) is True
+    assert seen["clamp"] is True
