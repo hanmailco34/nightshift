@@ -5,11 +5,13 @@ temperature per display. Built with Python, ships as a single `.exe`.
 
 > Status: early development. See `CLAUDE.md` and `cycles/` for the build log.
 
-## Features (planned)
-- Per-monitor day/night color temperature (2700K–6500K)
-- Automatic switching on a schedule (or manual sunrise/sunset by latitude/longitude)
-- System-tray background operation, run-at-startup, disable-on-fullscreen
-- Single-file `.exe` (no install), Windows 10/11
+## Features
+- Per-monitor day/night color temperature (3300K–6500K by default, 1500K with the opt-in extended range)
+- Schedule with manual times or sunrise/sunset by latitude/longitude (`astral`, offline)
+- 5-second linear fade between day and night, cancelled instantly when you grab a slider
+- System-tray icon (open / pause / set night now / quit); closing the window minimises to the tray
+- Run-at-startup (HKCU, no admin) and "pause while fullscreen app is in focus" toggles
+- Planned: single-file `.exe` (no install) for Windows 10/11 — cycle-03
 
 ## Dev setup
 ```sh

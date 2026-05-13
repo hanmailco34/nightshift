@@ -1,29 +1,29 @@
-"""tkinter main window.
+"""tkinter main window for nightshift (cycle-02).
 
 Layout:
-- Top bar: mode radio (day/night), per-monitor toggle, extended-range toggle.
-- Body: a ttk.Notebook with one MonitorPage per monitor when per-monitor is
-  on; otherwise a single global MonitorPage.
-- Bottom: placeholder for cycle-02 (schedule / tray / autostart).
+- Top bar: mode radio, per-monitor toggle, extended-range toggle.
+- Body (left): monitor pages (Notebook tabs when per-monitor is on; a single
+  global page when off).
+- Side (right): schedule / autostart / fullscreen settings cards.
+- Bottom: status bar (current mode + K, schedule mode, optional failure text).
 
-Slider behavior:
-- Dragging a slider re-applies the gamma ramp through a 200ms debounce.
-- Releasing the slider (<ButtonRelease-1>) flushes the pending apply and
-  persists the config.
-- Touching a slider auto-switches the current mode to that slider's mode.
+Window close (X) hides to the tray; quitting only happens from the tray
+"종료" menu item (the one place we reset gamma).
 
-Extended-range toggle flow:
-- OFF -> ON opens a modal dialog explaining the one-time GdiICMGammaRange
-  registry change + Windows reboot, lets the user copy the PowerShell
-  command to their clipboard, and on confirmation runs a self-diagnostic
-  (deep-warm apply on the primary monitor, then restore). If the diagnostic
-  fails the toggle is reverted.
-- ON -> OFF is free: clamp turns back on; the saved K values are preserved.
+cycle-02 additions over cycle-01:
+- Schedule + autostart + fullscreen integration via ``schedule.engine``,
+  ``platform.autostart``, ``platform.fullscreen``.
+- System tray via ``ui.tray``; tray menu handlers are marshalled to the tk
+  main thread with ``root.after(0, ...)``.
+- 5-second linear K interpolation on mode change (in ``schedule.engine``).
+  Slider drags call ``scheduler.cancel_transition()`` so user input wins.
 """
 
 from __future__ import annotations
 
+import re
 import tkinter as tk
+from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Dict, List, Optional
 
@@ -33,17 +33,24 @@ from ..color import gamma
 from ..color.temperature import kelvin_to_rgb
 from ..config import store
 from ..display.monitors import Monitor, list_monitors
+from ..platform import autostart, fullscreen
 from ..platform.registry import read_gdi_icm_gamma_range
+from ..schedule import engine
+from .tray import Tray
 
 CLAMPED_MIN_K = 3300
 UNCLAMPED_MIN_K = 1500
 DEBOUNCE_MS = 200
+FULLSCREEN_POLL_MS = 300
+NEXT_LABEL_REFRESH_MS = 60_000
 
 PS_COMMAND = (
     "Set-ItemProperty -Path "
     "'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM' "
     "-Name GdiICMGammaRange -Value 256 -Type DWord"
 )
+
+_HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 def _rgb_to_hex(rgb) -> str:
@@ -76,7 +83,7 @@ class MonitorPage(ttk.Frame):
         self.day_label.grid(row=1, column=1, sticky="e", pady=(10, 0))
         self.day_scale = tk.Scale(
             self, from_=min_k, to=MAX_KELVIN, orient="horizontal",
-            variable=self.day_var, showvalue=False, resolution=50, length=420,
+            variable=self.day_var, showvalue=False, resolution=50, length=380,
             command=lambda v: self._on_slider("day", int(float(v))))
         self.day_scale.grid(row=2, column=0, columnspan=2, sticky="ew")
         self.day_scale.bind("<ButtonRelease-1>",
@@ -91,7 +98,7 @@ class MonitorPage(ttk.Frame):
         self.night_label.grid(row=4, column=1, sticky="e")
         self.night_scale = tk.Scale(
             self, from_=min_k, to=MAX_KELVIN, orient="horizontal",
-            variable=self.night_var, showvalue=False, resolution=50, length=420,
+            variable=self.night_var, showvalue=False, resolution=50, length=380,
             command=lambda v: self._on_slider("night", int(float(v))))
         self.night_scale.grid(row=5, column=0, columnspan=2, sticky="ew")
         self.night_scale.bind("<ButtonRelease-1>",
@@ -140,9 +147,9 @@ class MainWindow:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("nightshift")
-        self.root.geometry("760x600")
+        self.root.geometry("960x600")
         try:
-            self.root.iconbitmap(default="")  # use system default
+            self.root.iconbitmap(default="")
         except tk.TclError:
             pass
 
@@ -163,17 +170,47 @@ class MainWindow:
         self.pages: Dict[Optional[str], MonitorPage] = {}
         self._debounce_job: Optional[str] = None
 
+        # cycle-02 state
+        self._paused = False
+        self._fullscreen_active = False
+        self._first_minimize = True
+        self._fullscreen_after: Optional[str] = None
+        self._next_label_after: Optional[str] = None
+
+        # Coordinators
+        self.scheduler = engine.Scheduler(
+            self.controller,
+            get_devices=lambda: [m.device_name for m in self.monitors],
+            root=self.root,
+            get_cfg=lambda: self.cfg,
+            on_mode_change=self._on_external_mode_change,
+        )
+        self.tray = Tray(
+            on_open=lambda: self.root.after(0, self._tray_open),
+            on_toggle_pause=lambda: self.root.after(0, self._tray_toggle_pause),
+            on_night_now=lambda: self.root.after(0, self._tray_night_now),
+            on_quit=lambda: self.root.after(0, self._tray_quit),
+            is_paused=lambda: self._paused,
+        )
+
         self._build_ui()
         self._refresh_pages()
         if self.monitors:
+            # Snap to the current target mode immediately, no interpolation.
+            target = engine.current_target_mode(datetime.now(), self.cfg)
+            self.controller.set_mode(target)
+            self.mode_var.set(target)
             self._apply_now()
+
+        autostart.sync_with_config(self.cfg)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---- UI construction -------------------------------------------------
     def _build_ui(self) -> None:
+        # top
         top = ttk.Frame(self.root, padding=(14, 12))
-        top.pack(fill="x")
+        top.pack(side="top", fill="x")
 
         self.mode_var = tk.StringVar(value=self.controller.mode)
         ttk.Label(top, text="현재 모드:").pack(side="left")
@@ -196,15 +233,104 @@ class MainWindow:
 
         ttk.Separator(self.root, orient="horizontal").pack(fill="x", padx=14)
 
+        # status bar (bottom — packed early so right/left fill remaining)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(
+            self.root, textvariable=self.status_var, foreground="gray",
+            padding=(14, 6), anchor="w")
+        self.status_label.pack(side="bottom", fill="x")
+
+        # side card (right)
+        self.side = ttk.Frame(self.root, padding=(0, 8, 14, 8))
+        self.side.pack(side="right", fill="y")
+        self._build_side_card()
+
+        # body (left, takes the remainder)
         self.body = ttk.Frame(self.root)
-        self.body.pack(fill="both", expand=True, padx=14, pady=(8, 4))
+        self.body.pack(side="left", fill="both", expand=True,
+                       padx=(14, 8), pady=(8, 4))
 
-        foot = ttk.Frame(self.root, padding=(14, 6))
-        foot.pack(fill="x")
-        ttk.Label(foot, foreground="gray",
-                  text="스케줄 / 트레이 / 자동실행은 cycle-02에서 추가됩니다."
-                  ).pack(side="left")
+        # Pause banner — created hidden, packed on demand above side+body.
+        self.pause_banner = tk.Label(
+            self.root, text="", bg="#f1c40f", fg="#2c3e50",
+            font=("Segoe UI", 11, "bold"), padx=14, pady=8, anchor="w")
 
+    def _build_side_card(self) -> None:
+        # Schedule
+        sched = ttk.LabelFrame(self.side, text="스케줄", padding=10)
+        sched.pack(fill="x", pady=(0, 8))
+
+        self.sched_mode_var = tk.StringVar(
+            value="astral" if self.cfg["toggles"]["use_sunset"] else "manual")
+        ttk.Radiobutton(sched, text="수동 시간", variable=self.sched_mode_var,
+                         value="manual", command=self._on_schedule_mode_change
+                         ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(sched, text="일출/일몰", variable=self.sched_mode_var,
+                         value="astral", command=self._on_schedule_mode_change
+                         ).grid(row=0, column=1, sticky="w")
+
+        ttk.Label(sched, text="주간 시작").grid(row=1, column=0, sticky="w",
+                                                   pady=(8, 0))
+        self.day_start_var = tk.StringVar(
+            value=str(self.cfg["schedule"].get("day_start", "07:00")))
+        e = ttk.Entry(sched, textvariable=self.day_start_var, width=8)
+        e.grid(row=1, column=1, sticky="e", pady=(8, 0))
+        e.bind("<FocusOut>", lambda _e: self._on_schedule_field_changed())
+        e.bind("<Return>", lambda _e: self._on_schedule_field_changed())
+
+        ttk.Label(sched, text="야간 시작").grid(row=2, column=0, sticky="w")
+        self.night_start_var = tk.StringVar(
+            value=str(self.cfg["schedule"].get("night_start", "21:00")))
+        e = ttk.Entry(sched, textvariable=self.night_start_var, width=8)
+        e.grid(row=2, column=1, sticky="e")
+        e.bind("<FocusOut>", lambda _e: self._on_schedule_field_changed())
+        e.bind("<Return>", lambda _e: self._on_schedule_field_changed())
+
+        ttk.Label(sched, text="위도").grid(row=3, column=0, sticky="w",
+                                               pady=(8, 0))
+        self.lat_var = tk.StringVar(value=str(self.cfg["location"]["lat"]))
+        e = ttk.Entry(sched, textvariable=self.lat_var, width=10)
+        e.grid(row=3, column=1, sticky="e", pady=(8, 0))
+        e.bind("<FocusOut>", lambda _e: self._on_schedule_field_changed())
+        e.bind("<Return>", lambda _e: self._on_schedule_field_changed())
+
+        ttk.Label(sched, text="경도").grid(row=4, column=0, sticky="w")
+        self.lon_var = tk.StringVar(value=str(self.cfg["location"]["lon"]))
+        e = ttk.Entry(sched, textvariable=self.lon_var, width=10)
+        e.grid(row=4, column=1, sticky="e")
+        e.bind("<FocusOut>", lambda _e: self._on_schedule_field_changed())
+        e.bind("<Return>", lambda _e: self._on_schedule_field_changed())
+
+        ttk.Button(sched, text="적용",
+                   command=self._on_schedule_field_changed
+                   ).grid(row=5, column=0, columnspan=2, sticky="e",
+                          pady=(10, 0))
+
+        self.next_label = ttk.Label(sched, text="", foreground="dimgray",
+                                      font=("Segoe UI", 8))
+        self.next_label.grid(row=6, column=0, columnspan=2, sticky="w",
+                              pady=(8, 0))
+        sched.columnconfigure(0, weight=1)
+
+        # Autostart
+        auto = ttk.LabelFrame(self.side, text="자동 실행", padding=10)
+        auto.pack(fill="x", pady=(0, 8))
+        self.autostart_var = tk.BooleanVar(
+            value=self.cfg["toggles"]["autostart"])
+        ttk.Checkbutton(auto, text="Windows 시작 시 자동 실행",
+                         variable=self.autostart_var,
+                         command=self._on_autostart_change).pack(anchor="w")
+
+        # Other toggles
+        other = ttk.LabelFrame(self.side, text="기타", padding=10)
+        other.pack(fill="x")
+        self.disable_fs_var = tk.BooleanVar(
+            value=self.cfg["toggles"]["disable_on_fullscreen"])
+        ttk.Checkbutton(other, text="전체화면 앱에서 비활성화",
+                         variable=self.disable_fs_var,
+                         command=self._on_disable_fs_change).pack(anchor="w")
+
+    # ---- monitor pages ---------------------------------------------------
     def _current_min_k(self) -> int:
         return UNCLAMPED_MIN_K if self.controller.extended_range else CLAMPED_MIN_K
 
@@ -240,6 +366,8 @@ class MainWindow:
     # ---- slider callbacks ------------------------------------------------
     def _on_slider_change(self, device: Optional[str], which: str,
                           value: int) -> None:
+        # User input wins over any in-flight interpolation.
+        self.scheduler.cancel_transition()
         if self.mode_var.get() != which:
             self.mode_var.set(which)
             self.controller.set_mode(which)  # type: ignore[arg-type]
@@ -258,12 +386,12 @@ class MainWindow:
 
     def _apply_now(self) -> None:
         self._debounce_job = None
-        if not self.monitors:
+        if not self.monitors or self._fullscreen_active or self._paused:
+            self._refresh_status()
             return
         failed = self.controller.apply_current(
             [m.device_name for m in self.monitors])
-        if failed:
-            print(f"nightshift: apply_kelvin returned False for {failed}")
+        self._refresh_status(failed)
 
     def _save(self) -> None:
         self.cfg["per_monitor_enabled"] = self.controller.per_monitor_enabled
@@ -275,6 +403,7 @@ class MainWindow:
 
     # ---- top-bar callbacks ----------------------------------------------
     def _on_mode_change(self) -> None:
+        self.scheduler.cancel_transition()
         self.controller.set_mode(self.mode_var.get())  # type: ignore[arg-type]
         self._apply_now()
         self._save()
@@ -305,7 +434,48 @@ class MainWindow:
         self._apply_now()
         self._save()
 
-    # ---- extended-range opt-in dialog -----------------------------------
+    # ---- side-card callbacks --------------------------------------------
+    def _on_schedule_mode_change(self) -> None:
+        self.cfg["toggles"]["use_sunset"] = (
+            self.sched_mode_var.get() == "astral")
+        store.save(self.cfg)
+        self._refresh_next_label_now()
+        self._refresh_status()
+
+    def _on_schedule_field_changed(self) -> None:
+        # Validate + persist. Silently ignore invalid entries (revert var).
+        ds, ns = self.day_start_var.get().strip(), self.night_start_var.get().strip()
+        if _HHMM_RE.match(ds) and _HHMM_RE.match(ns):
+            self.cfg["schedule"]["day_start"] = ds
+            self.cfg["schedule"]["night_start"] = ns
+        else:
+            self.day_start_var.set(self.cfg["schedule"]["day_start"])
+            self.night_start_var.set(self.cfg["schedule"]["night_start"])
+
+        try:
+            lat = float(self.lat_var.get().strip())
+            lon = float(self.lon_var.get().strip())
+            self.cfg["location"]["lat"] = lat
+            self.cfg["location"]["lon"] = lon
+        except ValueError:
+            self.lat_var.set(str(self.cfg["location"]["lat"]))
+            self.lon_var.set(str(self.cfg["location"]["lon"]))
+
+        store.save(self.cfg)
+        self._refresh_next_label_now()
+        self._refresh_status()
+
+    def _on_autostart_change(self) -> None:
+        self.cfg["toggles"]["autostart"] = bool(self.autostart_var.get())
+        store.save(self.cfg)
+        autostart.sync_with_config(self.cfg)
+
+    def _on_disable_fs_change(self) -> None:
+        self.cfg["toggles"]["disable_on_fullscreen"] = bool(
+            self.disable_fs_var.get())
+        store.save(self.cfg)
+
+    # ---- extended-range opt-in dialog (unchanged from cycle-01) ---------
     def _show_extended_dialog(self) -> bool:
         primary = next((m for m in self.monitors if m.primary),
                         self.monitors[0] if self.monitors else None)
@@ -361,7 +531,7 @@ class MainWindow:
         def copy_cmd() -> None:
             self.root.clipboard_clear()
             self.root.clipboard_append(PS_COMMAND)
-            self.root.update()  # required so clipboard sticks after window closes
+            self.root.update()
             messagebox.showinfo("nightshift", "클립보드에 복사했습니다.",
                                  parent=win)
 
@@ -401,14 +571,160 @@ class MainWindow:
         self.root.wait_window(win)
         return result["ok"]
 
-    # ---- shutdown --------------------------------------------------------
+    # ---- background ticks -----------------------------------------------
+    def _fullscreen_tick(self) -> None:
+        if self.monitors and self.cfg["toggles"]["disable_on_fullscreen"] and not self._paused:
+            visible = fullscreen.is_fullscreen_app_visible(self.monitors)
+            if visible and not self._fullscreen_active:
+                self._fullscreen_active = True
+                self.controller.reset_all(
+                    [m.device_name for m in self.monitors])
+            elif not visible and self._fullscreen_active:
+                self._fullscreen_active = False
+                self.controller.apply_current(
+                    [m.device_name for m in self.monitors])
+            self._refresh_status()
+        elif self._fullscreen_active:
+            # toggle was turned off mid-fullscreen — restore
+            self._fullscreen_active = False
+            self.controller.apply_current(
+                [m.device_name for m in self.monitors])
+            self._refresh_status()
+        self._fullscreen_after = self.root.after(
+            FULLSCREEN_POLL_MS, self._fullscreen_tick)
+
+    def _refresh_next_label_now(self) -> None:
+        try:
+            nt = engine.next_transition(datetime.now(), self.cfg)
+            target = engine.current_target_mode(datetime.now(), self.cfg)
+            kind = "야간" if target == "day" else "주간"
+            self.next_label.configure(text=f"다음 {kind} 전환: {nt.strftime('%H:%M')}")
+        except Exception:
+            self.next_label.configure(text="")
+
+    def _refresh_next_label_loop(self) -> None:
+        self._refresh_next_label_now()
+        self._next_label_after = self.root.after(
+            NEXT_LABEL_REFRESH_MS, self._refresh_next_label_loop)
+
+    def _refresh_status(self, failed: Optional[List[str]] = None) -> None:
+        mode_label = "주간" if self.controller.mode == "day" else "야간"
+        sched_label = "일몰감지" if self.cfg["toggles"]["use_sunset"] else "수동"
+        primary = next((m for m in self.monitors if m.primary),
+                        self.monitors[0] if self.monitors else None)
+        k_text = ""
+        if primary:
+            k = self.controller.target_for(primary.device_name)
+            k_text = f" {k}K"
+        if self._paused:
+            base = "일시중지 — 모든 모니터 정상색"
+            fg = "dimgray"
+        elif self._fullscreen_active:
+            base = f"전체화면 감지 — 임시 정상색 (모드 {mode_label})"
+            fg = "dimgray"
+        else:
+            base = f"{mode_label}{k_text} - {sched_label} 스케줄"
+            fg = "gray"
+        if failed:
+            base += f"   |   적용 실패: {', '.join(failed)}"
+            fg = "#c0392b"
+        self.status_var.set(base)
+        self.status_label.configure(foreground=fg)
+
+    # ---- external mode change (from scheduler interpolation finish) ------
+    def _on_external_mode_change(self, mode: str) -> None:
+        # Keep the top-bar radio in sync when the scheduler auto-transitions.
+        if self.mode_var.get() != mode:
+            self.mode_var.set(mode)
+        self._refresh_status()
+
+    # ---- pause banner ----------------------------------------------------
+    def _show_pause_banner(self) -> None:
+        self.pause_banner.configure(
+            text="⏸  일시중지됨 — 모든 모니터 정상색. 트레이에서 다시 시작하세요.")
+        try:
+            self.pause_banner.pack(side="top", fill="x", before=self.side)
+        except tk.TclError:
+            self.pause_banner.pack(side="top", fill="x")
+
+    def _hide_pause_banner(self) -> None:
+        self.pause_banner.pack_forget()
+
+    # ---- tray handlers (run on tk main thread via after) ----------------
+    def _tray_open(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_toggle_pause(self) -> None:
+        if self._paused:
+            self._paused = False
+            self._hide_pause_banner()
+            self.scheduler.resume()
+            target = engine.current_target_mode(datetime.now(), self.cfg)
+            self.controller.set_mode(target)
+            self.mode_var.set(target)
+            self._apply_now()
+        else:
+            self._paused = True
+            self._show_pause_banner()
+            self.scheduler.pause()
+            if self.monitors:
+                self.controller.reset_all(
+                    [m.device_name for m in self.monitors])
+        self._refresh_status()
+
+    def _tray_night_now(self) -> None:
+        self.scheduler.cancel_transition()
+        if self._paused:
+            self._paused = False
+            self._hide_pause_banner()
+            self.scheduler.resume()
+        self.mode_var.set("night")
+        # Don't pre-set controller.mode — let the transition end-step do it
+        # so on_mode_change fires correctly.
+        self.scheduler.begin_transition_now("night")
+        self._refresh_status()
+
+    def _tray_quit(self) -> None:
+        self._do_quit()
+
+    # ---- shutdown -------------------------------------------------------
     def _on_close(self) -> None:
+        # cycle-02: closing the window minimises to tray instead of resetting.
+        if self._first_minimize:
+            self._first_minimize = False
+            self.tray.notify("nightshift는 트레이에서 계속 실행됩니다. "
+                             "트레이 메뉴 '종료'로 완전히 끄세요.")
+        self.root.withdraw()
+
+    def _do_quit(self) -> None:
+        self.scheduler.stop()
+        if self._fullscreen_after is not None:
+            try:
+                self.root.after_cancel(self._fullscreen_after)
+            except tk.TclError:
+                pass
+        if self._next_label_after is not None:
+            try:
+                self.root.after_cancel(self._next_label_after)
+            except tk.TclError:
+                pass
         if self.monitors:
-            self.controller.reset_all([m.device_name for m in self.monitors])
-        self._save()
+            self.controller.reset_all(
+                [m.device_name for m in self.monitors])
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
         self.root.destroy()
 
     def run(self) -> None:
+        self.tray.start()
+        self.scheduler.start()
+        self._refresh_next_label_loop()
+        self._fullscreen_tick()
+        self._refresh_status()
         self.root.mainloop()
 
 
